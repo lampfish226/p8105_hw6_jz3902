@@ -124,3 +124,101 @@ boot_straps %>%
 
 The distribution of $log(\hat{\beta_0} * \hat{\beta_1})$ is
 approximately normal.
+
+## Problem 2
+
+``` r
+homicide_df = 
+  read_csv("data/homicide-data.csv") %>% 
+  mutate(
+    city_state = str_c(city, state, sep = ", "),
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age)
+    ) %>% 
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black")
+  )
+```
+
+### Baltimore: Logistic regression
+
+``` r
+fit_baltimore = 
+  homicide_df %>% 
+  filter(city_state == "Baltimore, MD") %>% 
+  glm(resolved ~ victim_age + victim_sex + victim_race, data = ., family = binomial()) 
+
+fit_baltimore %>% 
+  broom::tidy()
+```
+
+    ## # A tibble: 4 × 5
+    ##   term             estimate std.error statistic  p.value
+    ##   <chr>               <dbl>     <dbl>     <dbl>    <dbl>
+    ## 1 (Intercept)       0.310     0.171        1.81 7.04e- 2
+    ## 2 victim_age       -0.00673   0.00332     -2.02 4.30e- 2
+    ## 3 victim_sexMale   -0.854     0.138       -6.18 6.26e-10
+    ## 4 victim_raceWhite  0.842     0.175        4.82 1.45e- 6
+
+``` r
+fit_baltimore %>% 
+  broom::tidy(conf.int = TRUE, exponentiate = TRUE) %>% 
+  filter(term == "victim_sexMale") %>% 
+  select(term, estimate, conf.low, conf.high) %>% 
+  rename(odds_ratio = estimate)
+```
+
+    ## # A tibble: 1 × 4
+    ##   term           odds_ratio conf.low conf.high
+    ##   <chr>               <dbl>    <dbl>     <dbl>
+    ## 1 victim_sexMale      0.426    0.324     0.558
+
+Use `exponentiate = TRUE` to compute odds ratio.
+
+Homicides in which the victim is male are significantly less likely to
+be resolved than those in which the victim is female.
+
+### All cities: Logistic regression
+
+``` r
+fit_cities = 
+  homicide_df %>% 
+  select(city_state, resolved, victim_age, victim_sex, victim_race) %>% 
+  filter(victim_sex %in% c("Male", "Female")) %>% 
+  nest(data = resolved:victim_race) %>% 
+  mutate(
+    models = map(data, \(df) glm(resolved ~ victim_age + victim_sex + victim_race, 
+                                 data = df, family = binomial())),
+    results = map(models, \(x) broom::tidy(x = x, conf.int = TRUE, exponentiate = TRUE))
+  ) %>% 
+  select(city_state, results) %>% 
+  unnest(results) %>% 
+  rename(odds_ratio = estimate)
+
+fit_cities %>% 
+  filter(term == "victim_sexMale") %>% 
+  mutate(city_state = fct_reorder(city_state, odds_ratio)) %>% 
+  ggplot(aes(x = city_state, y = odds_ratio, color = city_state)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  labs(
+    title = "Solving homicides comparing male victims to female victims",
+    x = "City",
+    y = "Odds Ratio",
+    caption = "Estimated odds ratio and CI for solving homicides comparing male victims to female victims.") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 6, angle = 60, hjust = 1))
+```
+
+<img src="linear_models_files/figure-gfm/fit_cities-1.png" width="90%" />
+
+- For most cities in the dataset, homicides in which the victim is male
+  are less or similarly likely to be resolved than those in which the
+  victim is female.
+
+- For Fresno, CA, Stockton, CA and Albuquerque, NM, the estimated odds
+  ratios are greater than 1, while the confidence intervals still
+  include 1, meaning that we do not have enough evidence to conclude
+  that homicides with male victims are more likely to be resolved than
+  homicides with female victims.
