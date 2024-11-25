@@ -8,6 +8,7 @@ output: github_document
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(modelr)
+library(glmnet)
 set.seed(1)
 
 knitr::opts_chunk$set(
@@ -205,3 +206,170 @@ fit_cities %>%
 * For most cities in the dataset, homicides in which the victim is male are less or similarly likely to be resolved than those in which the victim is female.
 
 * For Fresno, CA, Stockton, CA and Albuquerque, NM, the estimated odds ratios are greater than 1, while the confidence intervals still include 1, meaning that we do not have enough evidence to conclude that homicides with male victims are more likely to be resolved than homicides with female victims.
+
+
+## Problem 3
+
+Loading and cleaning the data.
+
+```{r import_birth}
+birthweight_df = 
+  read_csv("data/birthweight.csv") %>% 
+  mutate(
+    babysex = 
+        case_match(babysex,
+            1 ~ "male",
+            2 ~ "female"
+        ),
+    babysex = fct_infreq(babysex),
+    frace = 
+        case_match(frace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican", 
+            8 ~ "other"),
+    frace = fct_infreq(frace),
+    mrace = 
+        case_match(mrace,
+            1 ~ "white",
+            2 ~ "black", 
+            3 ~ "asian", 
+            4 ~ "puerto rican",
+            8 ~ "other"),
+    mrace = fct_infreq(mrace),
+    malform = as.logical(malform))
+
+birthweight_df %>% 
+  is.na() %>% 
+  sum()
+```
+
+### LASSO model
+
+Preparing for lasso: 
+
+* Write a function to create predictor matrix
+
+* Create variables: predictor matrix `x` and outcome vector `y` 
+
+```{r lasso_x_y}
+x_matrix = function(df){
+  
+  x = model.matrix(bwt ~ ., df)[,-1]
+  
+  return(x)
+}
+
+x = x_matrix(birthweight_df)
+y = birthweight_df %>%  pull(bwt)
+```
+
+Cross validation: find the optimal lambda value.
+
+```{r lasso_cv}
+lambda = 10^(seq(-2, 2.75, 0.1))
+
+lasso_cv = cv.glmnet(x, y, lambda = lambda)
+
+lasso_cv |> 
+  broom::tidy() |> 
+  ggplot(aes(x = log(lambda, 10), y = estimate)) + 
+  geom_point()  
+
+lambda_opt = lasso_cv[["lambda.min"]]
+```
+
+Fitting a lasso model with optimal lambda.
+
+```{r lasso_fit}
+lasso_fit = glmnet(x, y, lambda = lambda_opt)
+
+lasso_fit %>% 
+  broom::tidy()
+```
+
+Plot of residuals against fitted values.
+
+```{r lasso_plot}
+birthweight_df %>%
+  mutate(
+    predictions = predict(lasso_fit, 
+                          newx = x_matrix(.),
+                          s = lambda_opt),
+    residuals = bwt - predictions
+  ) %>% 
+  ggplot(aes(x = predictions, y = residuals, color = predictions)) +
+  geom_point(alpha = .5) +
+  labs(
+    title = "LASSO model residuals vs fitted values",
+    x = "Predictions",
+    y = "Residuals",
+    color = "Predictions") +
+  theme(legend.text = element_text(angle = 45))
+```
+
+
+### Model comparison
+
+The three models:
+
+1) `lasso_mod`: a data-driven model-building process
+
+2) `main_mod`: using length at birth and gestational age as predictors (main effects only)
+
+3) `inter_mod`: using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+
+Doing cross-validation with map.
+
+```{r cv_rmse}
+cv_df = 
+  crossv_mc(birthweight_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_res_df = 
+  cv_df %>% 
+  mutate(
+    lasso_mod = map(train, \(df) glmnet(x = x_matrix(df), y = df$bwt, lambda = lambda_opt)),
+    main_mod = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    inter_mod = map(train, \(df) lm(bwt ~ bhead * blength * babysex, data = df))
+  ) %>% 
+  mutate(
+    lasso_predictions = map2(lasso_mod, test, \(x, y) 
+                             predict(x, newx = x_matrix(y), s = lambda_opt)),
+    rmse_lasso = map2_dbl(lasso_predictions, test, \(x, y) sqrt(mean((y$bwt - x)^2))),
+    rmse_main = map2_dbl(main_mod, test, rmse),
+    rmse_inter = map2_dbl(inter_mod, test, rmse)
+  )
+```
+
+Plotting the distribution of RMSE for each model.
+
+```{r rmse_plot}
+cv_res_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(), 
+    names_to = "model",
+    values_to = "rmse", 
+    names_prefix = "rmse_"
+  ) %>% 
+  mutate(model = fct_reorder(model, rmse)) %>% 
+  ggplot(aes(x = model, y = rmse, color = model)) +
+  geom_violin() +
+  labs(
+    title = "Distributions of RMSE values",
+    x = "Model",
+    y = "RMSE",
+    color = "Model")
+```
+
+* For this dataset, the LASSO model appears to be the model with the lowest error. 
+
+* Although LASSO is more advantageous in smaller dataset, we can still observe that its error is lower than other models. Therefore, LASSO still has some value for this dataset.
+
+
+
